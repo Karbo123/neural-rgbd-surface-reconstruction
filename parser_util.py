@@ -106,5 +106,7 @@ def get_parser():
                         help='frequency of weight ckpt saving')
     parser.add_argument("--i_mesh", type=int, default=200000,
                         help='frequency of mesh extraction')
+    parser.add_argument("--i_render", type=int, default=200000,
+                        help='frequency of rendering all images (including test set)')
 
     return parser

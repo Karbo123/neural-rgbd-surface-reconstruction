@@ -53,19 +53,19 @@ def extract_mesh(query_fn, feature_array, network_fn, args, voxel_size=0.01, iso
     offset = np.array([tx[0], ty[0], tz[0]])
     vertices[:, :3] = scale[np.newaxis, :] * vertices[:, :3] + offset
 
+    # query vertex color
+    vertices_fp32 = vertices.astype("float32")
+    color = np.concatenate([fn(vertices_fp32, i, min(i + chunk, len(vertices)))[0].numpy() \
+                            for i in range(0, vertices.shape[0], chunk)], 0).reshape(-1, 4)
+    color = color[:, :3] # extract RGB
+    color = 1.0 / (1.0 + np.exp(-color)) # sigmoid
+    color = (color * 255).round().astype("uint8")
+
     # Transform to metric units
     vertices[:, :3] = vertices[:, :3] / args.sc_factor - args.translation
 
     # Create mesh
-    mesh = trimesh.Trimesh(vertices, triangles, process=False)
-
-    # Transform the mesh to Scannet's coordinate system
-    gl_to_scannet = np.array([[1, 0, 0, 0],
-                              [0, 0, -1, 0],
-                              [0, 1, 0, 0],
-                              [0, 0, 0, 1]]).astype(np.float32).reshape([4, 4])
-
-    mesh.apply_transform(gl_to_scannet)
+    mesh = trimesh.Trimesh(vertices, triangles, vertex_colors=color, process=False)
 
     if mesh_savepath == '':
         mesh_savepath = os.path.join(args.basedir, args.expname, f"mesh_vs{voxel_size / args.sc_factor.ply}")

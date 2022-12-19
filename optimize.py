@@ -585,6 +585,18 @@ def train():
 
     # Load data
     images, depth_images, poses, hwf, frame_indices = load_dataset(args)
+    args.num_training_frames = len(images)
+    # load test set
+    train_datadir = args.datadir
+    args.datadir = args.datadir.replace("/train", "/test")
+    images_test, depth_images_test, poses_test, _, frame_indices_test = load_dataset(args)
+    args.datadir = train_datadir
+    # merge train with test
+    images       = np.concatenate([images,       images_test      ], axis=0)
+    depth_images = np.concatenate([depth_images, depth_images_test], axis=0)
+    poses        = np.concatenate([poses,        poses_test       ], axis=0)
+    frame_indices += [x + len(frame_indices) for x in frame_indices_test]
+    num_all_frames = len(images)
 
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -594,7 +606,6 @@ def train():
     far = args.far
 
     # Create nerf model
-    args.num_training_frames = len(images)
     render_kwargs_train, render_kwargs_test, start, grad_vars, models = create_nerf(args)
 
     feature_array = None
@@ -628,12 +639,12 @@ def train():
         # get_camera_rays_np() returns rays_direction=[H, W, 3]
         # for each pixel in the image. The origin is assumed to be (0, 0, 0).
         # This stack() adds a new dimension.
-        rays = np.stack([get_camera_rays_np(H, W, focal) for _ in range(poses.shape[0])], 0)  # [N, H, W, 3]
+        rays = np.stack([get_camera_rays_np(H, W, focal) for _ in range(args.num_training_frames)], 0)  # [N, H, W, 3]
         print('done, concats')
 
         # Concatenate color and depth
-        rays = np.concatenate([rays, images], -1)  # [N, H, W, 6]
-        rays = np.concatenate([rays, depth_images], -1)  # [N, H, W, 7]
+        rays = np.concatenate([rays, images[:args.num_training_frames]], -1)  # [N, H, W, 6]
+        rays = np.concatenate([rays, depth_images[:args.num_training_frames]], -1)  # [N, H, W, 7]
 
         # Concatenate frame ids
         ids = np.arange(rays.shape[0], dtype=np.float32)
@@ -790,13 +801,54 @@ def train():
             imageio.imwrite(os.path.join(trainimgdir, 'depth_{:06d}_{:04d}.png'.format(i, frame_idx)),
                             to8b(depth / np.max(depth)))
 
-        if i % args.i_mesh == 0 and i > 0:
+        if (i % args.i_mesh == 0 or i == N_iters) and i > 0:
             network_fn = render_kwargs_test['network_fine'] if render_kwargs_test['network_fine'] is not None else \
                          render_kwargs_test['network_fn']
             isolevel = 0.0 if args.mode == 'sdf' else 20.0
             mesh_savepath = os.path.join(args.basedir, args.expname, f'mesh_{i:06}.ply')
             extract_mesh.extract_mesh(render_kwargs_test['network_query_fn'], feature_array, network_fn, args,
                                       isolevel=isolevel, mesh_savepath=mesh_savepath)
+
+        if (i % args.i_render == 0 or i == N_iters) and i > 0: # we also render all images
+            def get_logging_images(img_i):
+                pose = np.eye(4, 4)
+
+                render_height = H // args.render_factor
+                render_width = W // args.render_factor
+                render_focal = focal / args.render_factor
+
+                ids = img_i * tf.ones([render_height * render_width, 1], tf.float32)
+
+                rgb, disp, acc, depth, extras = render(render_height, render_width, render_focal, chunk=args.chunk,
+                                                       frame_ids=ids,
+                                                       c2w=pose, eval_mode=True, **render_kwargs_test)
+
+                depth = depth[..., tf.newaxis].numpy()
+
+                if 'depth0' in extras:
+                    extras['depth0'] = extras['depth0'][..., tf.newaxis]
+
+                rgb = rgb.numpy()
+                acc = acc.numpy()
+                disp = disp.numpy()
+                for key in extras:
+                    extras[key] = extras[key].numpy()
+
+                return rgb, disp, acc, depth, extras
+
+            # save a rendered all view to disk
+            for img_i in range(num_all_frames):
+                print(f"rendering {img_i}th image, {num_all_frames} in total...")
+                rgb, _, _, depth, _ = get_logging_images(img_i)
+                frame_idx = frame_indices[img_i]
+
+                saveimgdir = os.path.join(basedir, expname, 'render_all_imgs', f"all-iter{i:06d}")
+                os.makedirs(saveimgdir, exist_ok=True)
+                tag = "train" if img_i < args.num_training_frames else "test"
+                imageio.imwrite(os.path.join(saveimgdir, f'rgb_{frame_idx:04d}_{tag}.png'), to8b(rgb))
+                imageio.imwrite(os.path.join(saveimgdir, f'depth_{frame_idx:04d}_{tag}.png'),
+                                (depth / args.sc_factor * 1000).round().astype("uint16"))
+
 
         global_step.assign_add(1)
 
